@@ -17,7 +17,7 @@ The bus protocol is undocumented and was reverse-engineered from captures (see [
 
 Other firmware versions have not been tested.
 
-> The ESPHome component `sec_touch` (PC port, 28800 baud) does not match this firmware. Here the PC port sends ASCII at 9600 baud (e.g. `0103A005FCF10000010105\r\n`) and has not been investigated further.
+> The ESPHome component [`sec_touch`](https://github.com/distante/esphome-components/tree/main/components/sec_touch) (PC port, 28800 baud) does not match this firmware. Here the PC port sends ASCII at 9600 baud (e.g. `0103A005FCF10000010105\r\n`) and has not been investigated further.
 
 ## Files
 
@@ -246,6 +246,10 @@ python3 bus_sniff.py /dev/rs485-bus --emulate 5 --baud 9600 --parity S --nine-bi
 Other options: `--parity-test` (each parity for 10 s), `--bits` (check the 9th bit of every byte), `--scan` (try baud rates), `--set PAIR LEVEL`.
 
 Note: the default baud rate of `bus_sniff.py` is still 9400, so always pass `--baud 9600`.
+
+## Related projects
+
+- [distante/esphome-components – `sec_touch`](https://github.com/distante/esphome-components/tree/main/components/sec_touch): ESPHome component for the SEC-Touch PC port. It uses a different interface and firmware, but its property numbers and mode values (boost, sleep, auto modes, summer ventilation) are a useful starting point for decoding further parts of the BUS A protocol.
 
 ## Disclaimer
 

@@ -6,7 +6,7 @@ Project context for Claude Code. Language: English. As of 2026-11-10.
 - SEVentilation central controller SEC-Touch, firmware **SWZ0021E21D**, 6 fan pairs (12 V DC).
 - TFT touch control panel (BDE), firmware **ETA0032E21C**, on BUS A (RS485), bus address **04**.
 - Rooms, pair 1–6: living room, bedroom, kids' room 2, home office, kids' room 1, storage room.
-- The ESPHome component `sec_touch` (PC port, 28800 baud) does **not** match this firmware. Here the PC port sends ASCII at 9600 baud (`0103A005FCF10000010105\r\n`) and has not been investigated further.
+- The ESPHome component `sec_touch` (https://github.com/distante/esphome-components/tree/main/components/sec_touch, PC port, 28800 baud) does **not** match this firmware. Here the PC port sends ASCII at 9600 baud (`0103A005FCF10000010105\r\n`) and has not been investigated further.
 
 ## Server (Ubuntu 24, Minisforum MS-A2)
 - Waveshare USB TO 2CH RS485 (isolated, FTDI FT2232H, no serial number). It is plugged into the back of the mainboard; the front port via the internal Genesys hub caused USB disconnects.
@@ -47,6 +47,7 @@ Project context for Claude Code. Language: English. As of 2026-11-10.
 - `lueftung*.yaml`: old ESPHome attempts (PC port), no longer in use.
 
 ## Open ideas
+- Use the `sec_touch` component linked above as a reference for property numbers and mode values when decoding further properties.
 - Capture the values for boost, sleep and the auto modes on the touch panel and add them to `MODES`.
 - Investigate summer ventilation (property 48 per sec_touch) and other properties.
 - Only one program may open `/dev/rs485-bus`: before testing with `bus_sniff.py`, run `sudo systemctl stop sec-touch-mqtt`.
