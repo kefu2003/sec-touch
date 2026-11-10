@@ -1,38 +1,38 @@
 # sec-touch
 
-Anbindung einer SEVentilation-Lüftungssteuerung **SEC-Touch** an **Home Assistant** über MQTT.
+Connects a SEVentilation **SEC-Touch** ventilation controller to **Home Assistant** via MQTT.
 
-Die Bridge hängt per USB-RS485-Adapter am internen Bus der Steuerung (BUS A) und meldet sich dort als zusätzliches Touch-Bedienteil an. In Home Assistant erscheint ein Gerät mit einer Auswahl-Entität pro Lüfterpaar (Stufe 1–6, Automatik). Stufenwechsel am Original-Touch werden mitgelesen und nach HA zurückgemeldet.
+The bridge is attached to the controller's internal bus (BUS A) through a USB-RS485 adapter and joins it as an additional touch control panel. Home Assistant shows one device with a select entity per fan pair (Level 1–6, Auto). Level changes made on the original touch panel are read back and reported to HA.
 
-Das Busprotokoll ist nicht dokumentiert und wurde durch Mitschneiden selbst entschlüsselt (siehe [Protokoll auf BUS A](#protokoll-auf-bus-a)).
+The bus protocol is undocumented and was reverse-engineered from captures (see [Protocol on BUS A](#protocol-on-bus-a)).
 
-## Getestete Anlage
+## Tested system
 
-| Komponente | Version |
+| Component | Version |
 |---|---|
-| Zentralregler SEC-Touch | Firmware `SWZ0021E21D`, 6 Lüfterpaare (12 V DC) |
-| TFT-Touch-Bedienteil (BDE) | Firmware `ETA0032E21C`, Busadresse `04` |
-| RS485-Adapter | Waveshare USB TO 2CH RS485 (FTDI FT2232H, isoliert) |
-| Server | Ubuntu 24.04, Home Assistant in Docker, Mosquitto auf dem Host |
+| SEC-Touch central controller | Firmware `SWZ0021E21D`, 6 fan pairs (12 V DC) |
+| TFT touch control panel (BDE) | Firmware `ETA0032E21C`, bus address `04` |
+| RS485 adapter | Waveshare USB TO 2CH RS485 (FTDI FT2232H, isolated) |
+| Server | Ubuntu 24.04, Home Assistant in Docker, Mosquitto on the host |
 
-Andere Firmwarestände wurden nicht getestet.
+Other firmware versions have not been tested.
 
-> Die ESPHome-Komponente `sec_touch` (PC-Port, 28800 Baud) passt nicht zu dieser Firmware. Der PC-Port sendet hier mit 9600 Baud ASCII (z. B. `0103A005FCF10000010105\r\n`) und wurde nicht weiter untersucht.
+> The ESPHome component `sec_touch` (PC port, 28800 baud) does not match this firmware. Here the PC port sends ASCII at 9600 baud (e.g. `0103A005FCF10000010105\r\n`) and has not been investigated further.
 
-## Dateien
+## Files
 
-| Datei | Zweck |
+| File | Purpose |
 |---|---|
-| `sec_touch_mqtt.py` | Bridge: Bus-Emulation als Bedienteil (Adresse 05), MQTT-Discovery, 6 `select`-Entitäten |
-| `sec-touch-mqtt.conf` | Vorlage für die Konfiguration (Port, Busadresse, MQTT-Zugang, Raumnamen) |
-| `sec-touch-mqtt.service` | systemd-Unit |
-| `bus_sniff.py` | Werkzeug zum Mitlesen, Dekodieren und Testen am Bus |
-| `ANLEITUNG-MQTT.md` | Schritt-für-Schritt-Einrichtung von Mosquitto, HA-Integration und Bridge |
-| `lueftung*.yaml` | Alte ESPHome-Versuche am PC-Port, nicht mehr in Gebrauch |
+| `sec_touch_mqtt.py` | Bridge: bus emulation as a control panel (address 05), MQTT discovery, 6 `select` entities |
+| `sec-touch-mqtt.conf` | Configuration template (port, bus address, MQTT login, room names) |
+| `sec-touch-mqtt.service` | systemd unit |
+| `bus_sniff.py` | Tool for listening, decoding and testing on the bus |
+| `SETUP-MQTT.md` | Step-by-step setup of Mosquitto, the HA integration and the bridge |
+| `lueftung*.yaml` | Old ESPHome attempts on the PC port, no longer in use |
 
-## Verkabelung
+## Wiring
 
-Port 1 des Adapters an BUS A der Steuerung, parallel zum vorhandenen Touch:
+Port 1 of the adapter to BUS A of the controller, in parallel with the existing touch panel:
 
 | Adapter | SEC-Touch BUS A |
 |---|---|
@@ -40,33 +40,33 @@ Port 1 des Adapters an BUS A der Steuerung, parallel zum vorhandenen Touch:
 | B | B1 |
 | – (GND) | PE |
 
-Port 2 kann zusätzlich parallel als passiver Mithörer angeschlossen werden.
+Port 2 can additionally be connected in parallel as a passive listener.
 
-Empfehlung: Feste Gerätenamen per udev-Regel vergeben (z. B. `/dev/rs485-bus`), da sich `ttyUSBx` nach einem Neustart ändern kann. Den Adapter möglichst direkt am Mainboard anschließen; über interne USB-Hubs gab es Verbindungsabbrüche.
+Recommendation: assign fixed device names with a udev rule (e.g. `/dev/rs485-bus`), because `ttyUSBx` can change after a reboot. Connect the adapter directly to the mainboard if possible; internal USB hubs caused disconnects.
 
-## Schnellstart
+## Quick start
 
-Ausführlich in [ANLEITUNG-MQTT.md](ANLEITUNG-MQTT.md). Kurzfassung:
+Details in [SETUP-MQTT.md](SETUP-MQTT.md). Short version:
 
 ```bash
 sudo apt install mosquitto python3-serial python3-paho-mqtt
 sudo mkdir -p /opt/sec-touch && sudo cp sec_touch_mqtt.py /opt/sec-touch/
 sudo cp sec-touch-mqtt.conf /etc/ && sudo chmod 600 /etc/sec-touch-mqtt.conf
-sudo nano /etc/sec-touch-mqtt.conf     # Port, MQTT-Passwort, Raumnamen
+sudo nano /etc/sec-touch-mqtt.conf     # port, MQTT password, room names
 sudo cp sec-touch-mqtt.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now sec-touch-mqtt
 journalctl -u sec-touch-mqtt -f
 ```
 
-Nach spätestens etwa 10 s (bzw. 60 s nach einem Neustart der Steuerung) sollte im Log `am Bus angemeldet (Adresse 5)` stehen.
+After about 10 s at most (or 60 s after a controller restart) the log should show `joined the bus (address 5)`.
 
-### Konfiguration
+### Configuration
 
 ```ini
 [bus]
-port = /dev/rs485-bus     # serielles Gerät an BUS A
-adresse = 5               # eigene Busadresse, darf nicht mit dem Touch (04) kollidieren
-anlaufzeit = 60           # Sekunden Schweigen nach Busstille (Neustart der Steuerung)
+port = /dev/rs485-bus     # serial device on BUS A
+address = 5               # own bus address, must not collide with the touch panel (04)
+startup_wait = 60         # seconds of silence after the bus was quiet (controller restart)
 
 [mqtt]
 host = localhost
@@ -76,52 +76,54 @@ password = ...
 topic = sec_touch
 discovery_prefix = homeassistant
 
-[anlage]
-raeume = Raum 1, Raum 2, Raum 3, Raum 4, Raum 5, Raum 6   # Paar 1 bis 6
+[system]
+rooms = Room 1, Room 2, Room 3, Room 4, Room 5, Room 6   # pair 1 to 6
 ```
 
-### MQTT-Topics
+The older German key names (`adresse`, `anlaufzeit`, `[anlage] raeume`) are still accepted.
 
-| Topic | Inhalt |
+### MQTT topics
+
+| Topic | Content |
 |---|---|
-| `sec_touch/status` | `online` / `offline` (Bridge am Bus angemeldet) |
-| `sec_touch/paar<n>/state` | aktueller Modus, z. B. `Stufe 3` oder `Automatik` (retained) |
-| `sec_touch/paar<n>/set` | gewünschter Modus, gleiche Texte wie bei `state` |
-| `homeassistant/select/sec_touch/paar<n>/config` | Discovery-Konfiguration |
+| `sec_touch/status` | `online` / `offline` (bridge has joined the bus) |
+| `sec_touch/pair<n>/state` | current mode, e.g. `Level 3` or `Auto` (retained) |
+| `sec_touch/pair<n>/set` | requested mode, same texts as `state` |
+| `homeassistant/select/sec_touch/paar<n>/config` | discovery configuration |
 
-Wichtig: Nur ein Programm darf den Bus-Port öffnen. Für Tests mit `bus_sniff.py` vorher `sudo systemctl stop sec-touch-mqtt`.
+Important: only one program may open the bus port. Before testing with `bus_sniff.py`, run `sudo systemctl stop sec-touch-mqtt`.
 
 ---
 
-## Protokoll auf BUS A
+## Protocol on BUS A
 
-Alles in diesem Abschnitt ist durch Mitschneiden und Ausprobieren ermittelt. Was nicht sicher ist, steht unter [Unbekannt / offen](#unbekannt--offen).
+Everything in this section was worked out by capturing and trial and error. Anything uncertain is listed under [Unknown / open](#unknown--open).
 
-### Physikalische Schicht
+### Physical layer
 
-- RS485, halbduplex, **9600 Baud, 9 Datenbits, 1 Stoppbit**.
-- Das 9. Bit ist ein Adress-/Rahmenbit: Bei den **ersten 2 Bytes** jedes Telegramms ist es 1, bei allen weiteren 0.
-- Mit einem normalen UART (FTDI) wird das als Parität nachgebildet: Byte 0–1 mit Parität **Mark**, der Rest mit Parität **Space**.
-  - Umschalten der Parität per `ioctl(TCSETS2)` direkt am Dateideskriptor; pyserial ist dafür zu langsam bzw. setzt den Port neu auf.
-  - Vor dem Umschalten etwa 2 Zeichenzeiten (≈ 2,3 ms) warten, weil `flush()` beim FTDI zurückkehrt, bevor die Bytes wirklich draußen sind.
-- **Lesen** funktioniert mit 9600 Baud und beliebiger Parität (S, M, E oder O); Paritätsfehler werden einfach ignoriert.
-- Mit 8N1 bei ~9400 Baud lässt sich der Bus zufällig auch halbwegs lesen. Das ist ein Irrweg: Das 9. Bit fällt dabei nur zufällig nicht auf.
+- RS485, half duplex, **9600 baud, 9 data bits, 1 stop bit**.
+- The 9th bit is an address/frame bit: it is 1 for the **first 2 bytes** of every frame and 0 for all others.
+- With a normal UART (FTDI) this is emulated with parity: bytes 0–1 with parity **Mark**, the rest with parity **Space**.
+  - The parity is switched with `ioctl(TCSETS2)` directly on the file descriptor; pyserial is too slow for this or reconfigures the port.
+  - Wait about 2 character times (≈ 2.3 ms) before switching, because on the FTDI `flush()` returns before the bytes are actually out.
+- **Reading** works at 9600 baud with any parity (S, M, E or O); parity errors are simply ignored.
+- With 8N1 at ~9400 baud the bus can also be read more or less by chance. That is a dead end: the 9th bit just happens not to show up.
 
-### Rahmenaufbau
+### Frame layout
 
 ```
  Byte:  0     1     2     3          4        5        6 …
-      [b0]  [b1]  [cmd] [len|flag] [CRC lo] [CRC hi] [Daten …]
-       └─9. Bit = 1─┘    └──────────── 9. Bit = 0 ───────────┘
+      [b0]  [b1]  [cmd] [len|flag] [CRC lo] [CRC hi] [data …]
+       └─9th bit = 1┘    └─────────── 9th bit = 0 ────────────┘
 ```
 
-| Feld | Bedeutung |
+| Field | Meaning |
 |---|---|
-| `b0` | meist `01`; siehe unten bei weiteren Telegrammen |
-| `b1` | Zieladresse bei Anfragen der Steuerung (`ff` = Rundruf), `00`/`01` bei Antworten |
-| `cmd` | Befehlscode |
-| `len` | Bit 0–6: Anzahl Datenbytes; Bit 7: Flag (Bedeutung unklar) |
-| CRC | CRC16-XMODEM (Poly `0x1021`, Init `0x0000`), little endian, über die 4 Kopfbytes **und** die Daten (die CRC-Bytes selbst ausgenommen) |
+| `b0` | usually `01`; see other frames below |
+| `b1` | target address in controller requests (`ff` = broadcast), `00`/`01` in responses |
+| `cmd` | command code |
+| `len` | bits 0–6: number of data bytes; bit 7: flag (meaning unclear) |
+| CRC | CRC16-XMODEM (poly `0x1021`, init `0x0000`), little endian, over the 4 header bytes **and** the data (excluding the CRC bytes themselves) |
 
 ```python
 def crc16_xmodem(data):
@@ -133,118 +135,118 @@ def crc16_xmodem(data):
     return crc
 ```
 
-### Busablauf
+### Bus sequence
 
-Die Steuerung ist **Master**, Bedienteile antworten nur auf Anfrage. Antworten kommen etwa **9 ms** nach der Anfrage.
+The controller is the **master**; control panels only answer when asked. Answers come about **9 ms** after the request.
 
-| Telegramm (ohne CRC) | Richtung | Bedeutung |
+| Frame (without CRC) | Direction | Meaning |
 |---|---|---|
-| `01 ff 84 00` | Steuerung → alle | Rundruf zur Anmeldung, alle 10 s |
-| `01 <adr> 84 00` | Steuerung → BDE | Abfrage (Poll), etwa alle 50 ms je angemeldetem Gerät |
-| `01 <adr> 86 00` | Steuerung → BDE | Quittungsanforderung nach jedem Daten-85 |
-| `01 <adr> 88 00` | Steuerung → BDE | Fehler / NAK |
-| `01 00 85 …` | beide | Daten (Property-Tripel), siehe unten |
+| `01 ff 84 00` | controller → all | join broadcast, every 10 s |
+| `01 <addr> 84 00` | controller → BDE | poll, about every 50 ms per joined device |
+| `01 <addr> 86 00` | controller → BDE | acknowledge request after every data 85 |
+| `01 <addr> 88 00` | controller → BDE | error / NAK |
+| `01 00 85 …` | both | data (property triples), see below |
 
-Befehlscodes im Überblick: `80`/`81` Anmeldung, `84` Abfrage, `85` Daten, `86`/`87` Quittung, `88` Fehler.
+Command codes at a glance: `80`/`81` join, `84` poll, `85` data, `86`/`87` acknowledge, `88` error.
 
-### Anmeldung eines Bedienteils
+### Joining as a control panel
 
-Im laufenden Betrieb, in dieser Reihenfolge (`<adr>` = eigene Adresse, z. B. `05`):
-
-```
-1. Steuerung: 01 ff 84 00                          Rundruf
-   BDE:       01 01 80 81 <adr>                    „ich bin <adr>“ (len 1, Flag gesetzt)
-2. Steuerung: 01 <adr> 80 05 00 00 01 01 05
-   BDE:       01 01 81 12 00 00 01 01 05 0a 00 "ETA0032E21C"
-3. Steuerung: 01 <adr> 81 00
-   BDE:       01 00 85 0d 0a 00 "ETA0032E21C"
-4. Ab jetzt:  01 <adr> 84 00  (Polls)
-```
-
-Bleiben die Polls mehr als 5 s aus, meldet sich die Bridge neu an.
-
-**Anlauf der Steuerung:** Beim Booten scannt die Steuerung die Adressen `02` bis `0C`. Antwortet die Bridge in dieser Phase, meldet sich (auch der Original-Touch) nicht korrekt an. Die Bridge erkennt einen Neustart an mehr als 2 s Busstille und liest danach für `anlaufzeit` (Standard 60 s) nur mit.
-
-### Abfrage und Daten (`85`)
-
-Auf jede Abfrage antwortet das Bedienteil entweder mit einem Befehl oder mit dem Keepalive:
+During operation, in this order (`<addr>` = own address, e.g. `05`):
 
 ```
-01 00 85 03 <crc> 0b 00 00          Keepalive („nichts zu melden“)
+1. Controller: 01 ff 84 00                          broadcast
+   BDE:        01 01 80 81 <addr>                   "I am <addr>" (len 1, flag set)
+2. Controller: 01 <addr> 80 05 00 00 01 01 05
+   BDE:        01 01 81 12 00 00 01 01 05 0a 00 "ETA0032E21C"
+3. Controller: 01 <addr> 81 00
+   BDE:        01 00 85 0d 0a 00 "ETA0032E21C"
+4. From now on: 01 <addr> 84 00  (polls)
 ```
 
-Datentelegramme enthalten eine Folge von Tripeln `[Property][Wert hi][Wert lo]`:
+If no polls arrive for more than 5 s, the bridge joins again.
+
+**Controller startup:** while booting, the controller scans addresses `02` to `0C`. If the bridge answers during this phase, devices (including the original touch panel) do not join correctly. The bridge detects a restart by more than 2 s of bus silence and then only listens for `startup_wait` (default 60 s).
+
+### Poll and data (`85`)
+
+The control panel answers every poll either with a command or with the keepalive:
 
 ```
-01 00 85 03 <crc> af 00 04          Lüfterpaar 3 auf Stufe 4
+01 00 85 03 <crc> 0b 00 00          keepalive ("nothing to report")
 ```
 
-Daten-85 werden auch von der Steuerung selbst als Rundsendung verschickt (z. B. wenn am Touch eine Stufe geändert wird). Darüber liest die Bridge den aktuellen Zustand mit.
+Data frames contain a sequence of triples `[property][value hi][value lo]`:
 
-**Lüfterpaare:** Paar *n* = Property `0xAC + n`, also `0xAD` (Paar 1) bis `0xB2` (Paar 6).
+```
+01 00 85 03 <crc> af 00 04          fan pair 3 to level 4
+```
 
-| Wert | Bedeutung | Status |
+The controller itself also sends data 85 frames as broadcasts (e.g. when a level is changed on the touch panel). This is how the bridge keeps track of the current state.
+
+**Fan pairs:** pair *n* = property `0xAC + n`, i.e. `0xAD` (pair 1) to `0xB2` (pair 6).
+
+| Value | Meaning | Status |
 |---|---|---|
-| `1`–`6` | Stufe 1–6 | verifiziert |
-| `0x0A` (10) | Automatik | verifiziert |
-| `7` | Stoßlüftung | vermutet (laut ESPHome `sec_touch`) |
-| `8` | Auto Feuchte | vermutet |
-| `9` | Auto CO2 | vermutet |
-| `10` | Auto Zeit | vermutet; kollidiert mit `0x0A` = Automatik, also eher falsch |
-| `11` | Schlummer | vermutet |
+| `1`–`6` | level 1–6 | verified |
+| `0x0A` (10) | auto | verified |
+| `7` | boost ventilation | assumed (per ESPHome `sec_touch`) |
+| `8` | auto humidity | assumed |
+| `9` | auto CO2 | assumed |
+| `10` | auto time | assumed; collides with `0x0A` = auto, so probably wrong |
+| `11` | sleep mode | assumed |
 
-Die Bridge bietet in HA nur die verifizierten Werte an.
+The bridge only offers the verified values in HA.
 
-### Quittung (`86` / `87`)
+### Acknowledge (`86` / `87`)
 
-Nach **jedem** Daten-85 auf dem Bus, auch nach den Rundsendungen der Steuerung und nach Telegrammen anderer Bedienteile, fragt die Steuerung jedes angemeldete Bedienteil mit `01 <adr> 86 00` nach einer Quittung. Die Antwort enthält die CRC genau dieses letzten 85-Telegramms:
+After **every** data 85 on the bus, including the controller's broadcasts and frames from other control panels, the controller asks every joined control panel for an acknowledgement with `01 <addr> 86 00`. The answer contains the CRC of exactly that last 85 frame:
 
 ```
-01 01 87 83 <crc> 00 <CRC lo des letzten 85> <CRC hi des letzten 85>
+01 01 87 83 <crc> 00 <CRC lo of the last 85> <CRC hi of the last 85>
 ```
 
-Stimmt die CRC nicht, wiederholt die Steuerung die `86`-Anfrage endlos.
+If the CRC is wrong, the controller repeats the `86` request forever.
 
-### Weitere beobachtete Telegramme
+### Other observed frames
 
-| Telegramm | Intervall | Bedeutung |
+| Frame | Interval | Meaning |
 |---|---|---|
-| `21 ff d2 80 …` | alle 0,78 s | unbekannt |
-| `00 00 00 0e …` | alle 5 s | Uhrzeit/Datum (Kodierung nicht entschlüsselt) |
-| 85 mit Property `0xA7`, `0xA8` | minütlich | unbekannt |
-| 85 mit Property `0x09` | – | Name des Bedienteils |
+| `21 ff d2 80 …` | every 0.78 s | unknown |
+| `00 00 00 0e …` | every 5 s | time/date (encoding not decoded) |
+| 85 with property `0xA7`, `0xA8` | every minute | unknown |
+| 85 with property `0x09` | – | name of the control panel |
 
-### Unbekannt / offen
+### Unknown / open
 
-- **Kopfbytes `b0`/`b1`:** Die Bedeutung ist nur teilweise klar. `b1` ist bei Anfragen die Zieladresse, bei Antworten aber mal `00` (bei `85`) und mal `01` (bei `80`, `81`, `87`). Ob `01` die Adresse der Steuerung ist und `00` „an alle“ bedeutet, ist nicht belegt. `b0` ist meist `01`, bei einigen Telegrammen aber `21` oder `00`.
-- **Flag-Bit 7 im Längenbyte:** gesetzt bei `80 81` und `87 83`, sonst nicht. Bedeutung unklar.
-- **Nutzdaten der Anmeldung:** `00 00 01 01 05` (Anfrage `80` / Antwort `81`) und das Präfix `0a 00` vor der Firmwarekennung werden 1:1 nachgebildet, ihre Bedeutung ist unbekannt. `0a` könnte die Property für die Firmwareversion sein.
-- **Keepalive `0b 00 00`:** Ob `0x0B` eine echte Property ist oder nur ein Platzhalter, ist offen.
-- **`88` (Fehler):** wann genau die Steuerung das sendet und ob Daten folgen, ist nicht untersucht.
-- **`21 ff d2 80 …`:** Inhalt und Zweck unbekannt (eventuell Kommunikation mit Erweiterungsmodulen).
-- **Uhrzeit-Telegramm `00 00 00 0e …`:** Aufbau der 14 Datenbytes nicht entschlüsselt; ebenso, ob es mit dem normalen Rahmenformat (CRC) übereinstimmt.
-- **Properties `0xA7`, `0xA8`:** minütlich gesendet, Bedeutung unbekannt (Laufzeit? Sensorwerte?).
-- **Weitere Betriebsarten:** Werte für Stoßlüftung, Schlummer und die Auto-Modi (Feuchte, CO2, Zeit) sind nicht am Gerät mitgeschnitten.
-- **Sommerlüftung:** laut ESPHome-Komponente Property `48` (`0x30`), nicht verifiziert.
-- **Rückmeldungen und Sensoren:** Ob die Steuerung Ist-Werte (Drehzahl, Feuchte, Fehlerzustände) auf BUS A verschickt, ist offen.
-- **PC-Port:** liefert ASCII mit 9600 Baud, Format nicht untersucht.
+- **Header bytes `b0`/`b1`:** only partly understood. In requests `b1` is the target address, in responses it is sometimes `00` (for `85`) and sometimes `01` (for `80`, `81`, `87`). Whether `01` is the controller's address and `00` means "to all" is not confirmed. `b0` is usually `01`, but `21` or `00` in some frames.
+- **Flag bit 7 in the length byte:** set for `80 81` and `87 83`, otherwise not. Meaning unclear.
+- **Join payload:** `00 00 01 01 05` (request `80` / response `81`) and the prefix `0a 00` before the firmware ID are copied 1:1; their meaning is unknown. `0a` might be the property for the firmware version.
+- **Keepalive `0b 00 00`:** whether `0x0B` is a real property or just a placeholder is open.
+- **`88` (error):** when exactly the controller sends it and whether data follows has not been investigated.
+- **`21 ff d2 80 …`:** content and purpose unknown (possibly communication with expansion modules).
+- **Time frame `00 00 00 0e …`:** layout of the 14 data bytes not decoded; also unclear whether it follows the normal frame format (CRC).
+- **Properties `0xA7`, `0xA8`:** sent every minute, meaning unknown (run time? sensor values?).
+- **Other operating modes:** the values for boost, sleep mode and the auto modes (humidity, CO2, time) have not been captured on the device.
+- **Summer ventilation:** property `48` (`0x30`) according to the ESPHome component, not verified.
+- **Feedback and sensors:** whether the controller sends actual values (fan speed, humidity, error states) on BUS A is open.
+- **PC port:** sends ASCII at 9600 baud, format not investigated.
 
-Mitschnitte und Ergänzungen sind willkommen.
+Captures and additions are welcome.
 
-## Werkzeug `bus_sniff.py`
+## Tool `bus_sniff.py`
 
 ```bash
-# Telegramme mit CRC-Prüfung dekodieren, nur neue/geänderte anzeigen
+# decode frames with CRC check, show only new/changed ones
 python3 bus_sniff.py /dev/rs485-ohr --baud 9600 --parity S --decode --new
 
-# Bedienteil mit Adresse 5 emulieren (funktionierender Aufruf)
+# emulate a control panel with address 5 (working invocation)
 python3 bus_sniff.py /dev/rs485-bus --emulate 5 --baud 9600 --parity S --nine-bit 2
 ```
 
-Weitere Optionen: `--parity-test` (alle Paritäten je 10 s), `--bits` (9. Bit je Byte prüfen), `--scan` (Baudraten durchprobieren), `--set PAAR STUFE`.
+Other options: `--parity-test` (each parity for 10 s), `--bits` (check the 9th bit of every byte), `--scan` (try baud rates), `--set PAIR LEVEL`.
 
-Achtung: Die Standard-Baudrate von `bus_sniff.py` ist noch 9400, daher `--baud 9600` immer angeben.
+Note: the default baud rate of `bus_sniff.py` is still 9400, so always pass `--baud 9600`.
 
-## Haftung
+## Disclaimer
 
-Inoffizielles Projekt, keine Verbindung zu SEVentilation. Eingriffe in die Lüftungsanlage erfolgen auf eigene Gefahr.
+Unofficial project, not affiliated with SEVentilation. Working on your ventilation system is at your own risk.

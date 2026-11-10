@@ -1,51 +1,52 @@
-# SEC-Touch Lüftung → Home Assistant
+# SEC-Touch ventilation → Home Assistant
 
-Projektkontext für Claude Code. Sprache: Deutsch. Stand 2026-11-10.
+Project context for Claude Code. Language: English. As of 2026-11-10.
 
-## Anlage
-- SEVentilation-Zentralregler SEC-Touch, Firmware **SWZ0021E21D**, 6 Lüfterpaare (12 V DC).
-- TFT-Touch-Bedienteil (BDE), Firmware **ETA0032E21C**, am BUS A (RS485), Busadresse **04**.
-- Räume, Paar 1–6: Wohnzimmer, Schlafzimmer, Kinderzimmer 2, Chef-Büro, Kinderzimmer 1, Abstellraum.
-- Die ESPHome-Komponente `sec_touch` (PC-Port, 28800 Baud) passt **nicht** zu dieser Firmware. Der PC-Port sendet hier 9600 Baud ASCII (`0103A005FCF10000010105\r\n`) und ist nicht weiter untersucht.
+## System
+- SEVentilation central controller SEC-Touch, firmware **SWZ0021E21D**, 6 fan pairs (12 V DC).
+- TFT touch control panel (BDE), firmware **ETA0032E21C**, on BUS A (RS485), bus address **04**.
+- Rooms, pair 1–6: living room, bedroom, kids' room 2, home office, kids' room 1, storage room.
+- The ESPHome component `sec_touch` (PC port, 28800 baud) does **not** match this firmware. Here the PC port sends ASCII at 9600 baud (`0103A005FCF10000010105\r\n`) and has not been investigated further.
 
 ## Server (Ubuntu 24, Minisforum MS-A2)
-- Waveshare USB TO 2CH RS485 (isoliert, FTDI FT2232H, ohne Seriennummer). Er hängt hinten am Mainboard; am Frontport über den internen Genesys-Hub gab es USB-Abbrüche.
-- udev-Aliase in `/etc/udev/rules.d/99-usb-serial.rules`:
-  - `/dev/rs485-bus` → if00 (ttyUSB1), Port 1 an BUS A (A↔A1, B↔B1, „–“↔PE)
-  - `/dev/rs485-ohr` → if01 (ttyUSB2), Port 2 parallel als passiver Mithörer
-- HA läuft als Docker (compose). Mosquitto ist per apt auf dem Host installiert, mit Benutzer `lueftung`.
-- Bridge: `/opt/sec-touch/sec_touch_mqtt.py`, Konfiguration `/etc/sec-touch-mqtt.conf`, systemd-Dienst `sec-touch-mqtt`.
+- Waveshare USB TO 2CH RS485 (isolated, FTDI FT2232H, no serial number). It is plugged into the back of the mainboard; the front port via the internal Genesys hub caused USB disconnects.
+- udev aliases in `/etc/udev/rules.d/99-usb-serial.rules`:
+  - `/dev/rs485-bus` → if00 (ttyUSB1), port 1 on BUS A (A↔A1, B↔B1, "–"↔PE)
+  - `/dev/rs485-ohr` → if01 (ttyUSB2), port 2 in parallel as a passive listener
+- HA runs in Docker (compose). Mosquitto is installed on the host via apt, with user `lueftung`.
+- Bridge: `/opt/sec-touch/sec_touch_mqtt.py`, config `/etc/sec-touch-mqtt.conf`, systemd service `sec-touch-mqtt`.
+- The config on the server may still use the old German keys (`adresse`, `anlaufzeit`, `[anlage] raeume`); the bridge accepts both.
 
-## BUS-A-Protokoll (selbst entschlüsselt)
-- **9600 Baud, 9 Datenbits** (9. Bit = Adressbit): Die ersten 2 Bytes jedes Telegramms haben Bit 9 = 1, alle übrigen 0. Mit dem FTDI umgesetzt als Parität Mark für Byte 0–1, dann Space. Umschalten per `TCSETS2` (`set_parity`), **nicht** über pyserial. Vor dem Umschalten etwa 2 Zeichenzeiten warten, weil `flush()` beim FTDI zu früh zurückkehrt.
-- Lesen geht mit 9600 und Parität S (oder M/E/O). Mit 8N1 bei 9400 liest es sich nur zufällig sauber, das war anfangs der Irrweg.
-- Rahmen: `[b0][b1][cmd][len: Bit0-6 Länge, Bit7 Flag][CRC lo][CRC hi][Daten]`. CRC16-XMODEM (Poly 0x1021, Init 0) über die 4 Kopfbytes und die Daten.
-- Die Steuerung ist Master. Rundruf `01 ff 84 00` kommt alle 10 s, Abfrage `01 <adr> 84 00` etwa alle 50 ms.
-- Anmeldung im laufenden Betrieb, in dieser Reihenfolge:
-  1. Auf den Rundruf antwortet das Gerät mit `01 01 80 81 <adr>`.
-  2. Steuerung `01 <adr> 80 05 00 00 01 01 05` → Gerät `01 01 81 12 00 00 01 01 05 0a 00 "ETA0032E21C"`.
-  3. Steuerung `01 <adr> 81 00` → Gerät `01 00 85 0d 0a 00 "ETA0032E21C"`.
-  4. Danach beginnen die Abfragen.
-- Antwort auf eine Abfrage: Befehl oder Keepalive `01 00 85 03 .. .. 0b 00 00`. Die Antwort kommt etwa 9 ms nach der Anfrage.
-- Befehl `01 00 85` mit Tripeln `[Property][hi][lo]`. Lüfterpaar n = Property `0xAC+n` (0xAD … 0xB2).
-  - Wert 1–6 = Stufe, 0x0A = Automatik.
-  - Laut sec_touch vermutlich 7–11 = Stoß, Auto Feuchte, Auto CO2, Auto Zeit, Schlummer. Das ist noch nicht verifiziert.
-- Quittung: Nach **jedem** Daten-85 auf dem Bus, auch nach den Rundsendungen der Steuerung, fragt sie jede BDE mit `01 <adr> 86 00`. Antwort: `01 01 87 83 00 <CRC-Bytes genau dieses 85>`. Bei falscher CRC wiederholt die Steuerung die 86 endlos.
-- `01 <adr> 88 00` = Fehler/NAK.
-- Beim Boot scannt die Steuerung die Adressen 02..0C. Ist die Bridge beim Start der Steuerung aktiv, meldet sich keiner an. Deshalb schweigt die Bridge nach mehr als 2 s Busstille für `anlaufzeit` (60 s).
-- Weitere Telegramme: `21 ff d2 80` alle 0,78 s, `00 00 00 0e …` = Uhrzeit alle 5 s, Properties 0xA7/0xA8 minütlich. Property 9 = BDE-Name.
+## BUS A protocol (reverse-engineered)
+- **9600 baud, 9 data bits** (9th bit = address bit): the first 2 bytes of every frame have bit 9 = 1, all others 0. Done on the FTDI as parity Mark for bytes 0–1, then Space. Switch with `TCSETS2` (`set_parity`), **not** via pyserial. Wait about 2 character times before switching, because `flush()` returns too early on the FTDI.
+- Reading works with 9600 and parity S (or M/E/O). With 8N1 at 9400 it only reads cleanly by chance; that was the initial dead end.
+- Frame: `[b0][b1][cmd][len: bits 0-6 length, bit 7 flag][CRC lo][CRC hi][data]`. CRC16-XMODEM (poly 0x1021, init 0) over the 4 header bytes and the data.
+- The controller is master. Broadcast `01 ff 84 00` every 10 s, poll `01 <addr> 84 00` about every 50 ms.
+- Joining during operation, in this order:
+  1. The device answers the broadcast with `01 01 80 81 <addr>`.
+  2. Controller `01 <addr> 80 05 00 00 01 01 05` → device `01 01 81 12 00 00 01 01 05 0a 00 "ETA0032E21C"`.
+  3. Controller `01 <addr> 81 00` → device `01 00 85 0d 0a 00 "ETA0032E21C"`.
+  4. Then the polls start.
+- Answer to a poll: command or keepalive `01 00 85 03 .. .. 0b 00 00`. The answer comes about 9 ms after the request.
+- Command `01 00 85` with triples `[property][hi][lo]`. Fan pair n = property `0xAC+n` (0xAD … 0xB2).
+  - Value 1–6 = level, 0x0A = auto.
+  - According to sec_touch, 7–11 are probably boost, auto humidity, auto CO2, auto time, sleep. Not verified yet.
+- Acknowledge: after **every** data 85 on the bus, including the controller's broadcasts, it asks every BDE with `01 <addr> 86 00`. Answer: `01 01 87 83 00 <CRC bytes of exactly that 85>`. With a wrong CRC the controller repeats the 86 forever.
+- `01 <addr> 88 00` = error/NAK.
+- On boot the controller scans addresses 02..0C. If the bridge is active while the controller starts, nobody joins. So after more than 2 s of bus silence the bridge stays quiet for `startup_wait` (60 s).
+- Other frames: `21 ff d2 80` every 0.78 s, `00 00 00 0e …` = time every 5 s, properties 0xA7/0xA8 every minute. Property 9 = BDE name.
 
-## Dateien in diesem Ordner
-- `sec_touch_mqtt.py`: Bridge (Bus-Emulation als BDE 05, MQTT-Discovery, 6 `select`-Entitäten).
-- `sec-touch-mqtt.conf` / `.service`: Vorlage für Konfiguration und Dienst (Passwort steht nur auf dem Server).
-- `bus_sniff.py`: Werkzeug zum Analysieren und Testen.
-  - Optionen: `--decode --new`, `--parity-test`, `--bits`, `--emulate ADR`.
-  - Funktionierender Aufruf: `--emulate 5 --baud 9600 --parity S --nine-bit 2`.
-  - Achtung: Standard-Baud ist noch 9400.
-- `ANLEITUNG-MQTT.md`: Einrichtung von Mosquitto und Bridge.
-- `lueftung*.yaml`: alte ESPHome-Versuche (PC-Port), nicht mehr in Gebrauch.
+## Files in this folder
+- `sec_touch_mqtt.py`: bridge (bus emulation as BDE 05, MQTT discovery, 6 `select` entities).
+- `sec-touch-mqtt.conf` / `.service`: templates for config and service (the password only exists on the server).
+- `bus_sniff.py`: tool for analysis and testing.
+  - Options: `--decode --new`, `--parity-test`, `--bits`, `--emulate ADDR`.
+  - Working invocation: `--emulate 5 --baud 9600 --parity S --nine-bit 2`.
+  - Note: the default baud is still 9400.
+- `SETUP-MQTT.md`: setup of Mosquitto and the bridge.
+- `lueftung*.yaml`: old ESPHome attempts (PC port), no longer in use.
 
-## Offene Ideen
-- Werte für Stoßlüftung, Schlummer und die Auto-Modi am Touch mitschneiden und in `MODES` aufnehmen.
-- Sommerlüftung (Property 48 laut sec_touch) und weitere Properties untersuchen.
-- Nur ein Programm darf `/dev/rs485-bus` öffnen: Für Tests mit `bus_sniff.py` vorher `sudo systemctl stop sec-touch-mqtt`.
+## Open ideas
+- Capture the values for boost, sleep and the auto modes on the touch panel and add them to `MODES`.
+- Investigate summer ventilation (property 48 per sec_touch) and other properties.
+- Only one program may open `/dev/rs485-bus`: before testing with `bus_sniff.py`, run `sudo systemctl stop sec-touch-mqtt`.

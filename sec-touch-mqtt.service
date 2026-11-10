@@ -1,5 +1,5 @@
 [Unit]
-Description=SEC-Touch Lueftung <-> MQTT Bridge
+Description=SEC-Touch ventilation <-> MQTT bridge
 After=network-online.target mosquitto.service
 Wants=network-online.target
 

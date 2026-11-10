@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Liest den RS485-Bus (BUS A) zwischen SEC-Touch und Touch-Bedienteil passiv mit.
-Sendet NICHTS. Benötigt: pip install pyserial  (oder: sudo apt install python3-serial)
+"""Passively listens to the RS485 bus (BUS A) between the SEC-Touch and the touch panel.
+Sends NOTHING (except with --set / --emulate).
+Requires: pip install pyserial  (or: sudo apt install python3-serial)
 
-Baudrate suchen:   python3 bus_sniff.py /dev/ttyUSB1 --scan   (speichert scan_*.bin)
-Mitschneiden:      python3 bus_sniff.py /dev/ttyUSB1 --baud 9400 > bus.txt
-Dekodieren:        python3 bus_sniff.py /dev/ttyUSB1 --baud 9400 --decode --new > bus_dec.txt
+Find baud rate:  python3 bus_sniff.py /dev/ttyUSB1 --scan   (saves scan_*.bin)
+Record:          python3 bus_sniff.py /dev/ttyUSB1 --baud 9600 --parity S > bus.txt
+Decode:          python3 bus_sniff.py /dev/ttyUSB1 --baud 9600 --parity S --decode --new > bus_dec.txt
 """
 import argparse, sys, time
 import serial
@@ -12,10 +13,10 @@ import serial
 BAUDS = [1200, 2400, 4800, 9600, 14400, 19200, 28800, 38400, 57600, 76800, 115200]
 
 def scan(port, bauds, seconds=8):
-    """Liest je Baudrate einige Sekunden, speichert Rohdaten als scan_<baud>.bin
-    und misst, wie oft sich das haeufigste 10-Byte-Muster exakt wiederholt."""
+    """Reads a few seconds per baud rate, saves the raw data as scan_<baud>.bin
+    and measures how often the most frequent 10-byte pattern repeats exactly."""
     import collections
-    print("  Baud   Bytes  Treffer  haeufigstes Muster")
+    print("  Baud   Bytes     Hits  most frequent pattern")
     for b in bauds:
         with serial.Serial(port, b, timeout=0.2) as s:
             s.reset_input_buffer()
@@ -40,9 +41,9 @@ def crc16_xmodem(data):
     return crc
 
 def decode(port, baud, only_new):
-    """Telegramformat (aus Mitschnitten abgeleitet):
-    [b0][b1][b2][Laenge: Bits 0-6, Bit 7 = Flag][CRC16-XMODEM low][high][Daten ...]
-    CRC ueber die 4 Kopfbytes + Daten."""
+    """Frame format (derived from captures):
+    [b0][b1][b2][length: bits 0-6, bit 7 = flag][CRC16-XMODEM low][high][data ...]
+    CRC over the 4 header bytes + data."""
     seen = set()
     buf = b""
     with serial.Serial(port, baud, timeout=0.05) as s:
@@ -50,7 +51,7 @@ def decode(port, baud, only_new):
             buf += s.read(256)
             while len(buf) >= 6:
                 n = buf[3] & 0x7F
-                if n > 48:          # unplausible Laenge -> kein Rahmenanfang
+                if n > 48:          # implausible length -> not a frame start
                     buf = buf[1:]
                     continue
                 if len(buf) < 6 + n:
@@ -69,7 +70,7 @@ def decode(port, baud, only_new):
                           f"len={n:2d}  {data.hex(' ')}  |{text}|")
                     sys.stdout.flush()
                 else:
-                    buf = buf[1:]   # kein gueltiger Rahmen hier, ein Byte weiter suchen
+                    buf = buf[1:]   # no valid frame here, try one byte further
 
 def build_frame(head3, data, flag=0):
     body = bytes(head3) + bytes([len(data) | flag]) + bytes(data)
@@ -77,15 +78,15 @@ def build_frame(head3, data, flag=0):
     return body[:4] + bytes([crc & 0xFF, crc >> 8]) + body[4:]
 
 TRIGGERS = {
-    "frei": None,                              # nur Ruhepause abwarten
-    "poll": bytes.fromhex("01 04 84 00 28 7d"),  # normale Abfrage (Touch antwortet sonst)
-    "broadcast": bytes.fromhex("01 ff 84 00 8b 6e"),  # Rundruf alle ~10 s, bisher antwortet niemand
+    "idle": None,                              # just wait for a quiet gap
+    "poll": bytes.fromhex("01 04 84 00 28 7d"),  # regular poll (otherwise the touch panel answers)
+    "broadcast": bytes.fromhex("01 ff 84 00 8b 6e"),  # broadcast every ~10 s
 }
 
 def set_level(port, baud, fan, level, trigger, repeat):
-    """EXPERIMENTELL: sendet 'Lüfterpaar <fan> auf Stufe <level>'
-    (Property 0xAC+fan, wie vom Touch beobachtet) und liest 3 s mit."""
-    prop = 0xAC + fan                      # Paar 1 = 0xAD (173) ... Paar 6 = 0xB2 (178)
+    """EXPERIMENTAL: sends 'fan pair <fan> to level <level>'
+    (property 0xAC+fan, as observed from the touch panel) and listens for 3 s."""
+    prop = 0xAC + fan                      # pair 1 = 0xAD (173) ... pair 6 = 0xB2 (178)
     frame = build_frame([0x01, 0x00, 0x85], [prop, 0x00, level])
     trig = TRIGGERS[trigger]
     with serial.Serial(port, baud, timeout=0.005) as s:
@@ -96,21 +97,21 @@ def set_level(port, baud, fan, level, trigger, repeat):
                 if s.read(64):
                     quiet_since = time.time()
         else:
-            print(f"warte auf {trig.hex(' ')} ...")
+            print(f"waiting for {trig.hex(' ')} ...")
             buf, deadline = b"", time.time() + 30
             while trig not in buf:
                 buf = (buf + s.read(64))[-64:]
                 if time.time() > deadline:
-                    print("Ausloeser nicht gesehen, nichts gesendet.")
+                    print("Trigger not seen, nothing sent.")
                     return
         for _ in range(repeat):
             s.write(frame)
             s.flush()
-        print(f"gesendet ({repeat}x):", frame.hex(" "))
+        print(f"sent ({repeat}x):", frame.hex(" "))
         end, buf = time.time() + 3, b""
         while time.time() < end:
             buf += s.read(256)
-    # Antwort zerlegen, Routine-Telegramme ausblenden
+    # split the response, hide routine frames
     while len(buf) >= 6:
         n = buf[3] & 0x7F
         if n <= 48 and len(buf) >= 6 + n and crc16_xmodem(buf[:4] + buf[6:6 + n]) == buf[4] | (buf[5] << 8):
@@ -122,9 +123,9 @@ def set_level(port, baud, fan, level, trigger, repeat):
             buf = buf[1:]
 
 def bits(port, baud, seconds=60):
-    """Prueft das 9. Bit jedes Bytes (Stoppbit-Position). Bei reinem 8N1 ist es immer 1.
-    Ist es 0, meldet der Adapter einen Rahmenfehler -> Byte wird mit * markiert.
-    So erkennen wir Paritaet (8E1/8O1) oder 9-Bit-Adressmodus, den pyserial sonst verschluckt."""
+    """Checks the 9th bit of every byte (stop bit position). With plain 8N1 it is always 1.
+    If it is 0, the adapter reports a framing error -> the byte is marked with *.
+    This reveals parity (8E1/8O1) or 9-bit address mode, which pyserial would otherwise hide."""
     import termios, collections
     with serial.Serial(port, baud, timeout=0.01) as s:
         a = termios.tcgetattr(s.fd)
@@ -134,10 +135,10 @@ def bits(port, baud, seconds=60):
         s.reset_input_buffer()
         raw = b""
         end = time.time() + seconds
-        print(f"Lese {seconds} s ...")
+        print(f"Reading for {seconds} s ...")
         while time.time() < end:
             raw += s.read(4096)
-    # PARMRK: ff 00 xx = Fehlerbyte xx, ff ff = echtes ff
+    # PARMRK: ff 00 xx = error byte xx, ff ff = literal ff
     data, err, i = [], [], 0
     while i < len(raw):
         if raw[i] == 0xFF and i + 1 < len(raw) and raw[i + 1] == 0xFF:
@@ -147,8 +148,8 @@ def bits(port, baud, seconds=60):
         else:
             data.append(raw[i]); err.append(False); i += 1
     n = len(data); ne = sum(err)
-    print(f"{n} Bytes, davon {ne} mit 9. Bit = 0 ({ne / max(n, 1):.1%})")
-    # Telegramme per CRC finden und Fehlermuster je Telegrammtyp zeigen
+    print(f"{n} bytes, {ne} of them with 9th bit = 0 ({ne / max(n, 1):.1%})")
+    # find frames by CRC and show the error pattern per frame type
     seen = collections.Counter(); i = 0
     while i + 6 <= n:
         ln = data[i + 3] & 0x7F
@@ -162,15 +163,15 @@ def bits(port, baud, seconds=60):
                 i = j
                 continue
         i += 1
-    print("Haeufigkeit  Telegrammanfang (* = 9. Bit war 0)")
+    print("     Count  frame start (* = 9th bit was 0)")
     for k, v in seen.most_common(25):
         print(f"{v:6d}       {k}")
 
 def parity_test(port, baud, seconds=10):
-    """Liest je Paritaetseinstellung N/E/O/M/S einige Sekunden und zaehlt Fehlerbytes
-    und gueltige Telegramme. Die richtige Einstellung hat (fast) keine Fehler."""
+    """Reads a few seconds per parity setting N/E/O/M/S and counts error bytes
+    and valid frames. The correct setting has (almost) no errors."""
     import termios
-    print("Paritaet  Bytes  Fehler  gueltige Telegramme")
+    print("Parity     Bytes  Errors  valid frames")
     for par in "NEOMS":
         with serial.Serial(port, baud, parity=par, timeout=0.01) as s:
             a = termios.tcgetattr(s.fd)
@@ -202,9 +203,9 @@ def parity_test(port, baud, seconds=10):
         sys.stdout.flush()
 
 def set_parity_fast(fd, par):
-    """Schaltet nur die Paritaet um (M/S/N), ohne die Baudrate anzufassen.
-    pyserial setzt bei 9400 Baud (keine Standardrate) kurz 38400 Baud, dabei werden Bytes verstuemmelt.
-    Nutzt deshalb direkt TCGETS2/TCSETS2 (Linux x86/ARM)."""
+    """Switches only the parity (M/S/N) without touching the baud rate.
+    At 9400 baud (not a standard rate) pyserial briefly sets 38400 baud, which garbles bytes.
+    So this uses TCGETS2/TCSETS2 directly (Linux x86/ARM)."""
     import fcntl, struct, termios
     TCGETS2, TCSETS2 = 0x802C542A, 0x402C542B
     PARENB, PARODD, CMSPAR = termios.PARENB, termios.PARODD, 0o10000000000
@@ -219,14 +220,14 @@ def set_parity_fast(fd, par):
     fcntl.ioctl(fd, TCSETS2, bytes(buf))
 
 def emulate(port, baud, addr, logfile, turnaround=0.009, join_data=None, parity="N", mark_bytes=0):
-    """EXPERIMENTELL: meldet sich als zusaetzliches Bedienteil mit Adresse <addr> an,
-    so wie das echte Touch es im laufenden Betrieb tut:
-      Steuerung: 01 ff 84 00 (Rundruf, alle 10 s)  -> wir: 01 01 80 81 <addr>
-      Steuerung: 01 <addr> 80 05 ...                -> wir: 01 01 81 12 <Kennung>
-      Steuerung: 01 <addr> 81 00                    -> wir: 01 00 85 0d 0a 00 <Kennung>
-      Steuerung: 01 <addr> 84 00 (Abfrage)          -> wir: Befehl oder 01 00 85 03 0b 00 00
-      Steuerung: 01 <addr> 86 00                    -> wir: 01 01 87 83 00 <CRC unseres letzten 85>
-    Eingabe im Terminal: '<paar> <stufe>', z.B. '1 2'. Alles wird mit ms in <logfile> geschrieben."""
+    """EXPERIMENTAL: joins as an additional control panel with address <addr>,
+    the same way the real touch panel does during operation:
+      controller: 01 ff 84 00 (broadcast, every 10 s) -> us: 01 01 80 81 <addr>
+      controller: 01 <addr> 80 05 ...                 -> us: 01 01 81 12 <ID>
+      controller: 01 <addr> 81 00                     -> us: 01 00 85 0d 0a 00 <ID>
+      controller: 01 <addr> 84 00 (poll)              -> us: command or 01 00 85 03 0b 00 00
+      controller: 01 <addr> 86 00                     -> us: 01 01 87 83 00 <CRC of the last 85>
+    Terminal input: '<pair> <level>', e.g. '1 2'. Everything is logged with ms to <logfile>."""
     import threading, queue
     fw = b"ETA0032E21C"
     join_req = bytes.fromhex("01 ff 84 00 8b 6e")
@@ -241,10 +242,10 @@ def emulate(port, baud, addr, logfile, turnaround=0.009, join_data=None, parity=
                 fan, level = (int(x) for x in line.split())
             except ValueError:
                 if line.strip():
-                    print("Format: <paar> <stufe>, z.B. 1 2")
+                    print("Format: <pair> <level>, e.g. 1 2")
                 continue
             todo.put(build_frame([0x01, 0x00, 0x85], [0xAC + fan, 0x00, level]))
-            print(f"-> Paar {fan} Stufe {level} wird bei der naechsten Abfrage gesendet")
+            print(f"-> pair {fan} level {level} will be sent at the next poll")
     threading.Thread(target=ui, daemon=True).start()
 
     log = open(logfile, "a")
@@ -253,7 +254,7 @@ def emulate(port, baud, addr, logfile, turnaround=0.009, join_data=None, parity=
         ts = time.strftime("%H:%M:%S", time.localtime(t)) + f".{int(t % 1 * 1000):03d}"
         log.write(f"{ts} {direction} {frame.hex(' ')}{extra}\n"); log.flush()
 
-    print(f"Warte auf Rundruf der Steuerung (alle ~10 s), Adresse {addr:02x} ...")
+    print(f"Waiting for the controller's broadcast (every ~10 s), address {addr:02x} ...")
     state = "join"            # join -> scan -> polled
     last85 = keepalive
     last_ack = None
@@ -263,20 +264,20 @@ def emulate(port, baud, addr, logfile, turnaround=0.009, join_data=None, parity=
         except Exception:
             pass
         def send(frame, text=None):
-            # Das echte Touch wartet ~9 ms nach dem Ende der Anfrage, bevor es antwortet.
-            # Sofortiges Antworten verschluckt die Steuerung vermutlich (ihr Sender ist noch aktiv).
+            # The real touch panel waits ~9 ms after the end of the request before answering.
+            # The controller probably drops immediate answers (its transmitter is still active).
             time.sleep(turnaround)
             if mark_bytes:
-                # 9-Bit-Modus: die ersten <mark_bytes> Bytes mit 9. Bit = 1 (Mark), Rest mit 0 (Space)
+                # 9-bit mode: the first <mark_bytes> bytes with 9th bit = 1 (Mark), the rest with 0 (Space)
                 set_parity_fast(s.fd, "M"); s.write(frame[:mark_bytes]); s.flush()
-                # flush() kehrt beim FTDI zu frueh zurueck -> sicher warten, bis die Bytes raus sind
+                # flush() returns too early on the FTDI -> wait until the bytes are really out
                 time.sleep(mark_bytes * 11 / baud + 0.0015)
                 t0 = time.perf_counter()
                 set_parity_fast(s.fd, "S")
                 gap = (time.perf_counter() - t0) * 1000
                 s.write(frame[mark_bytes:]); s.flush()
                 set_parity_fast(s.fd, parity)
-                note(">", frame, f"   (9-Bit, Umschalten {gap:.1f} ms)")
+                note(">", frame, f"   (9-bit, switching {gap:.1f} ms)")
             else:
                 s.write(frame); s.flush()
                 note(">", frame)
@@ -296,34 +297,34 @@ def emulate(port, baud, addr, logfile, turnaround=0.009, join_data=None, parity=
                 f, buf = buf[:6 + n], buf[6 + n:]
                 note("<", f)
                 if f[2] == 0x85 and f[6:] != b"\x0b\x00\x00":
-                    last85 = f      # 87 quittiert das letzte Daten-Telegramm auf dem Bus (auch das der Steuerung)
-                if f == join_req and state != "polled":   # bei jedem Rundruf erneut versuchen
-                    send(build_frame([0x01, 0x01, 0x80], [addr if join_data is None else join_data], flag=0x80), "Rundruf beantwortet")
+                    last85 = f      # 87 acknowledges the last data frame on the bus (including the controller's own)
+                if f == join_req and state != "polled":   # retry on every broadcast
+                    send(build_frame([0x01, 0x01, 0x80], [addr if join_data is None else join_data], flag=0x80), "broadcast answered")
                     state = "scan"
                 elif f == scan_req:
                     send(build_frame([0x01, 0x01, 0x81], bytes.fromhex("00 00 01 01 05 0a 00") + fw),
-                         "Kennung gesendet")
+                         "ID sent")
                 elif f[:4] == bytes([0x01, addr, 0x81, 0x00]):
-                    print("   Anmeldung bestaetigt (81)")
-                    send(build_frame([0x01, 0x00, 0x85], bytes.fromhex("0a 00") + fw), "Firmware gemeldet")
+                    print("   join confirmed (81)")
+                    send(build_frame([0x01, 0x00, 0x85], bytes.fromhex("0a 00") + fw), "firmware reported")
                 elif f == poll_req:
                     if state != "polled":
-                        print("   Erste Abfrage erhalten: angemeldet!")
+                        print("   first poll received: joined!")
                         state = "polled"
                     frame = todo.get() if not todo.empty() else keepalive
                     if frame != keepalive:
                         last85 = frame
-                    send(frame, None if frame == keepalive else "Befehl gesendet")
+                    send(frame, None if frame == keepalive else "command sent")
                 elif f[:4] == bytes([0x01, addr, 0x86, 0x00]):
                     ack = build_frame([0x01, 0x01, 0x87], b"\x00" + last85[4:6], flag=0x80)
-                    send(ack, None if ack == last_ack else "Rueckfrage (86) quittiert")
+                    send(ack, None if ack == last_ack else "acknowledge request (86) answered")
                     last_ack = ack
                 elif f[:3] == bytes([0x01, addr, 0x88]):
-                    print("   ABGELEHNT (88)")
+                    print("   REJECTED (88)")
 
 def sniff(port, baud, parity):
     char_time = 11.0 / baud
-    gap = max(3.5 * char_time, 0.002)          # Pause, die zwei Telegramme trennt
+    gap = max(3.5 * char_time, 0.002)          # gap that separates two frames
     with serial.Serial(port, baud, parity=parity, timeout=gap) as s:
         frame, t0 = b"", None
         while True:
@@ -344,27 +345,27 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("port")
     ap.add_argument("--baud", type=int, default=9400)
-    ap.add_argument("--parity", choices=list("NEOMS"), default="N", help="N/E/O/M(ark)/S(pace), auch fuer --emulate")
+    ap.add_argument("--parity", choices=list("NEOMS"), default="N", help="N/E/O/M(ark)/S(pace), also used by --emulate")
     ap.add_argument("--scan", action="store_true")
-    ap.add_argument("--parity-test", action="store_true", help="Paritaet N/E/O/M/S je 10 s testen")
-    ap.add_argument("--bits", action="store_true", help="9. Bit/Paritaet jedes Bytes pruefen (60 s)")
-    ap.add_argument("--decode", action="store_true", help="Telegramme mit CRC-Pruefung zerlegen")
-    ap.add_argument("--new", action="store_true", help="mit --decode: nur neue/geaenderte Telegramme")
-    ap.add_argument("--set", nargs=2, type=int, metavar=("PAAR", "STUFE"),
-                    help="EXPERIMENTELL: ein Telegramm senden, z.B. --set 1 2")
+    ap.add_argument("--parity-test", action="store_true", help="test parity N/E/O/M/S for 10 s each")
+    ap.add_argument("--bits", action="store_true", help="check the 9th bit/parity of every byte (60 s)")
+    ap.add_argument("--decode", action="store_true", help="decode frames with CRC check")
+    ap.add_argument("--new", action="store_true", help="with --decode: only new/changed frames")
+    ap.add_argument("--set", nargs=2, type=int, metavar=("PAIR", "LEVEL"),
+                    help="EXPERIMENTAL: send one frame, e.g. --set 1 2")
     ap.add_argument("--trigger", choices=list(TRIGGERS), default="broadcast",
-                    help="mit --set: wann gesendet wird")
-    ap.add_argument("--repeat", type=int, default=1, help="mit --set: Telegramm n-mal senden")
-    ap.add_argument("--emulate", type=lambda x: int(x, 0), metavar="ADR",
-                    help="EXPERIMENTELL: als Bedienteil mit Adresse ADR anmelden, z.B. --emulate 5")
-    ap.add_argument("--wait", type=float, default=9, help="mit --emulate: Wartezeit vor jeder Antwort in ms")
+                    help="with --set: when to send")
+    ap.add_argument("--repeat", type=int, default=1, help="with --set: send the frame n times")
+    ap.add_argument("--emulate", type=lambda x: int(x, 0), metavar="ADDR",
+                    help="EXPERIMENTAL: join as a control panel with address ADDR, e.g. --emulate 5")
+    ap.add_argument("--wait", type=float, default=9, help="with --emulate: delay before each answer in ms")
     ap.add_argument("--join-data", type=lambda x: int(x, 0), default=None,
-                    help="mit --emulate: Datenbyte im Anmeldetelegramm (Standard = ADR)")
+                    help="with --emulate: data byte in the join frame (default = ADDR)")
     ap.add_argument("--nine-bit", type=int, default=0, metavar="N",
-                    help="mit --emulate: 9-Bit-Modus, die ersten N Bytes mit Mark, Rest mit Space (z.B. 2)")
-    ap.add_argument("--log", default="emulate.log", help="mit --emulate: Logdatei")
+                    help="with --emulate: 9-bit mode, first N bytes with Mark, the rest with Space (e.g. 2)")
+    ap.add_argument("--log", default="emulate.log", help="with --emulate: log file")
     ap.add_argument("--bauds", default="9000,9200,9400,9500,9600,9700,9800,10000,10200,19200",
-                    help="Baudraten fuer --scan, kommagetrennt")
+                    help="baud rates for --scan, comma-separated")
     a = ap.parse_args()
     try:
         if a.scan:
