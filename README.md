@@ -126,7 +126,8 @@ Everything in this section was worked out by capturing and trial and error. Anyt
 ```
  Byte:  0     1     2     3          4        5        6 …
       [b0]  [b1]  [cmd] [len|flag] [CRC lo] [CRC hi] [data …]
-       └─9th bit = 1┘    └─────────── 9th bit = 0 ────────────┘
+      └────────┘  └─────────────────────────────────────────┘
+     9th bit = 1                  9th bit = 0
 ```
 
 | Field | Meaning |
