@@ -41,7 +41,7 @@ Test it by hand first:
 sudo python3 /opt/sec-touch/sec_touch_mqtt.py --config /etc/sec-touch-mqtt.conf
 ```
 
-Within about 10 s you should see "joined the bus (address 5)". HA then shows the device **Ventilation SEC-Touch** with 6 select entities (Level 1 to 6, Auto).
+Within about 10 s you should see "joined the bus (address 5) after N broadcasts". HA then shows the device **Ventilation SEC-Touch** with 6 select entities (Level 1 to 6, Auto) and two diagnostic entities: **Controller clock** and **Controller hanging**.
 
 If that works, stop it with Ctrl+C and install it as a service:
 
@@ -55,4 +55,6 @@ journalctl -u sec-touch-mqtt -f              # follow the log
 ## Notes
 
 - `/dev/ttyUSB1` can change after a reboot. Use a fixed name via a udev rule (e.g. `/dev/rs485-bus`) or `/dev/serial/by-id/...`.
+- The bridge sets the controller's clock to the server's local time if it is off by more than 60 s. Make sure the server time is correct (NTP), or set `clock_fix = false`.
+- If **Controller hanging** turns on, the controller no longer polls any control panel; neither the touch panel nor HA can change levels. Useful as an HA automation trigger for a notification.
 - Only the values verified on the device are offered so far: Level 1 to 6 and Auto. Boost, sleep mode etc. will be added once their values have been captured from the touch panel.

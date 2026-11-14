@@ -4,6 +4,11 @@ Connects a SEVentilation **SEC-Touch** ventilation controller to **Home Assistan
 
 The bridge is attached to the controller's internal bus (BUS A) through a USB-RS485 adapter and joins it as an additional touch control panel. Home Assistant shows one device with a select entity per fan pair (Level 1–6, Auto). Level changes made on the original touch panel are read back and reported to HA.
 
+In addition, the bridge
+
+- keeps the controller's clock in sync with the server (local time) and shows it in HA,
+- reports when the controller hangs (it still sends its time, but no longer polls any control panel).
+
 The bus protocol is undocumented and was reverse-engineered from captures (see [Protocol on BUS A](#protocol-on-bus-a)).
 
 ## Tested system
@@ -28,7 +33,6 @@ Other firmware versions have not been tested.
 | `sec-touch-mqtt.service` | systemd unit |
 | `bus_sniff.py` | Tool for listening, decoding and testing on the bus |
 | `SETUP-MQTT.md` | Step-by-step setup of Mosquitto, the HA integration and the bridge |
-| `lueftung*.yaml` | Old ESPHome attempts on the PC port, no longer in use |
 
 ## Wiring
 
@@ -58,7 +62,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now sec-touch-mqtt
 journalctl -u sec-touch-mqtt -f
 ```
 
-After about 10 s at most (or 60 s after a controller restart) the log should show `joined the bus (address 5)`.
+After about 10 s at most (or 60 s after a controller restart) the log should show `joined the bus (address 5) after N broadcasts`.
 
 ### Configuration
 
@@ -67,6 +71,8 @@ After about 10 s at most (or 60 s after a controller restart) the log should sho
 port = /dev/rs485-bus     # serial device on BUS A
 address = 5               # own bus address, must not collide with the touch panel (04)
 startup_wait = 60         # seconds of silence after the bus was quiet (controller restart)
+clock_fix = true          # set the controller's clock to the server time if it drifts
+clock_tolerance = 60      # allowed drift in seconds before the clock is set
 
 [mqtt]
 host = localhost
@@ -80,7 +86,7 @@ discovery_prefix = homeassistant
 rooms = Room 1, Room 2, Room 3, Room 4, Room 5, Room 6   # pair 1 to 6
 ```
 
-The older German key names (`adresse`, `anlaufzeit`, `[anlage] raeume`) are still accepted.
+The older German key names (`adresse`, `anlaufzeit`, `uhr_stellen`, `uhr_toleranz`, `[anlage] raeume`) are still accepted.
 
 ### MQTT topics
 
@@ -89,7 +95,13 @@ The older German key names (`adresse`, `anlaufzeit`, `[anlage] raeume`) are stil
 | `sec_touch/status` | `online` / `offline` (bridge has joined the bus) |
 | `sec_touch/pair<n>/state` | current mode, e.g. `Level 3` or `Auto` (retained) |
 | `sec_touch/pair<n>/set` | requested mode, same texts as `state` |
-| `homeassistant/select/sec_touch/paar<n>/config` | discovery configuration |
+| `sec_touch/clock` | controller date and time, `YYYY-MM-DD HH:MM`, updated every minute (retained) |
+| `sec_touch/stalled` | `ON` / `OFF`: controller hangs (retained) |
+| `homeassistant/select/sec_touch/paar<n>/config` | discovery configuration of the fan pairs |
+| `homeassistant/sensor/sec_touch/uhrzeit/config` | discovery of the sensor "Controller clock" (diagnostic) |
+| `homeassistant/binary_sensor/sec_touch/haengt/config` | discovery of the binary sensor "Controller hanging" (diagnostic, device class `problem`) |
+
+The discovery object IDs and `unique_id`s (`paar<n>`, `uhrzeit`, `haengt`) keep their original German names so that existing HA entities stay linked.
 
 Important: only one program may open the bus port. Before testing with `bus_sniff.py`, run `sudo systemctl stop sec-touch-mqtt`.
 
@@ -207,12 +219,36 @@ After **every** data 85 on the bus, including the controller's broadcasts and fr
 
 If the CRC is wrong, the controller repeats the `86` request forever.
 
+### Clock
+
+The controller broadcasts its date and time every 5 s. The frame uses the normal layout with CRC, but with header `00 00 00` and 14 data bytes in properties of the form `[property][0x00][values …]`:
+
+```
+00 00 00 0e <crc>  01 00 00 DD MM YY  02 00 SS MM HH  04 00 00
+                   └ date ─────────┘  └ time ───────┘  └ unknown
+```
+
+All values are plain binary (not BCD), the year counts from 2000. Example: `01 00 00 0e 0b 1a 02 00 1e 2d 13` = 2026-11-14 19:45:30.
+
+The touch panel sets the clock with two ordinary data 85 frames in its poll answers, which the bridge copies:
+
+```
+01 00 85 06 <crc> 01 00 00 DD MM YY       date
+01 00 85 05 <crc> 02 00 SS MM HH          time
+```
+
+The bridge compares the controller's time with the server's local time once it has joined. If they differ by more than `clock_tolerance` seconds (default 60), it sends both frames, at most once every 10 minutes. This can be switched off with `clock_fix = false`.
+
+### Controller hang detection
+
+The controller can get into a state where it stops polling: the time frame and other broadcasts keep coming, but there are no more `01 xx 84 00` frames (neither the join broadcast nor polls to any device), so neither the touch panel nor the bridge can send commands. The bridge sets `sec_touch/stalled` to `ON` when the bus is active (a frame within the last 3 s) but no `84` frame has been seen for 90 s, and back to `OFF` as soon as polls resume. After a controller restart (bus silence) the detection waits for `startup_wait`. The bridge only reports the hang; it does not try to recover from it.
+
 ### Other observed frames
 
 | Frame | Interval | Meaning |
 |---|---|---|
 | `21 ff d2 80 …` | every 0.78 s | unknown |
-| `00 00 00 0e …` | every 5 s | time/date (encoding not decoded) |
+| `00 00 00 0e …` | every 5 s | date and time, see [Clock](#clock) |
 | 85 with property `0xA7`, `0xA8` | every minute | unknown |
 | 85 with property `0x09` | – | name of the control panel |
 
@@ -224,7 +260,7 @@ If the CRC is wrong, the controller repeats the `86` request forever.
 - **Keepalive `0b 00 00`:** whether `0x0B` is a real property or just a placeholder is open.
 - **`88` (error):** when exactly the controller sends it and whether data follows has not been investigated.
 - **`21 ff d2 80 …`:** content and purpose unknown (possibly communication with expansion modules).
-- **Time frame `00 00 00 0e …`:** layout of the 14 data bytes not decoded; also unclear whether it follows the normal frame format (CRC).
+- **Time frame `00 00 00 0e …`:** the last triple `04 00 00` is not understood (day of week? DST flag?).
 - **Properties `0xA7`, `0xA8`:** sent every minute, meaning unknown (run time? sensor values?).
 - **Other operating modes:** the values for boost, sleep mode and the auto modes (humidity, CO2, time) have not been captured on the device.
 - **Summer ventilation:** property `48` (`0x30`) according to the ESPHome component, not verified.

@@ -8,7 +8,7 @@ Level changes made on the original touch panel are read back.
 Requires: sudo apt install python3-serial python3-paho-mqtt
 Run:      python3 sec_touch_mqtt.py --config /etc/sec-touch-mqtt.conf
 """
-import argparse, configparser, fcntl, json, queue, struct, sys, termios, threading, time
+import argparse, configparser, datetime, fcntl, json, queue, struct, sys, termios, threading, time
 
 import serial
 import paho.mqtt.client as mqtt
@@ -54,7 +54,8 @@ class Bus:
     JOIN_REQ = bytes.fromhex("01 ff 84 00 8b 6e")
     KEEPALIVE = build_frame([0x01, 0x00, 0x85], [0x0B, 0x00, 0x00])
 
-    def __init__(self, port, addr, on_level, on_online, turnaround=0.009, startup_wait=60):
+    def __init__(self, port, addr, on_level, on_online, turnaround=0.009, startup_wait=60,
+                 on_clock=None, clock_fix=True, clock_tolerance=60, on_stall=None):
         self.addr = addr
         self.on_level, self.on_online = on_level, on_online
         self.turnaround = turnaround
@@ -73,6 +74,14 @@ class Bus:
         # join first (if both start at the same time, nobody manages to join).
         self.startup_wait = startup_wait
         self.last_frame = 0.0
+        # Check the controller's clock and set it if it drifts (server local time)
+        self.on_clock, self.clock_fix, self.clock_tolerance = on_clock, clock_fix, clock_tolerance
+        self.last_clock_fix = 0.0
+        self.joins = 0
+        # Detect a hanging controller: the time frame still arrives, but no broadcasts/polls
+        self.on_stall = on_stall
+        self.last_poll_any = time.time()
+        self.stalled = None
         self.quiet_until = 0.0
 
     def send(self, frame):
@@ -84,7 +93,30 @@ class Bus:
     def set_level(self, pair, value):
         self.todo.put(build_frame([0x01, 0x00, 0x85], [FIRST_PROP + pair - 1, 0x00, value]))
 
+    def set_clock(self, now=None):
+        """Set date and time exactly like the touch panel does:
+        date: 85 | 01 00 00 DD MM YY    time: 85 | 02 00 SS MM HH"""
+        n = now or datetime.datetime.now()
+        self.todo.put(build_frame([0x01, 0x00, 0x85], [0x01, 0x00, 0x00, n.day, n.month, n.year - 2000]))
+        self.todo.put(build_frame([0x01, 0x00, 0x85], [0x02, 0x00, n.second, n.minute, n.hour]))
+
+    @staticmethod
+    def parse_clock(f):
+        """Controller time frame (every 5 s): 00 00 00 0e | 01 00 00 DD MM YY 02 00 SS MM HH 04 00 00"""
+        d = f[6:]
+        if f[:4] != b"\x00\x00\x00\x0e" or len(d) < 11 or d[0] != 1 or d[6] != 2:
+            return None
+        try:
+            return datetime.datetime(2000 + d[5], d[4], d[3], d[10], d[9], d[8])
+        except ValueError:
+            return None
+
     def read_levels(self, f):
+        if f[0] == 0x01 and f[2] == 0x84:          # broadcast or poll of any device
+            self.last_poll_any = time.time()
+        clock = self.parse_clock(f)
+        if clock and self.on_clock:
+            self.on_clock(clock)
         if f[2] == 0x85 and f[6:] != b"\x0b\x00\x00":
             self.last85 = f
             d = f[6:]
@@ -96,17 +128,30 @@ class Bus:
 
     def handle(self, f):
         self.read_levels(f)
+        clock = self.parse_clock(f)
+        if clock and self.clock_fix and self.state == "polled" and time.time() - self.last_clock_fix > 600:
+            diff = (clock - datetime.datetime.now()).total_seconds()
+            if abs(diff) > self.clock_tolerance:
+                log(f"controller clock is off by {diff:+.0f} s ({clock}), setting it")
+                self.set_clock()
+                self.last_clock_fix = time.time()
         a = self.addr
         if f == self.JOIN_REQ and self.state != "polled":
             self.send(build_frame([0x01, 0x01, 0x80], [a], flag=0x80))
+            self.joins += 1
+            if self.joins <= 3 or self.joins % 6 == 0:
+                log(f"answered broadcast (attempt {self.joins})")
             self.state = "scan"
         elif f == self.scan_req:
+            log("controller requests identification, answering")
             self.send(build_frame([0x01, 0x01, 0x81], bytes.fromhex("00 00 01 01 05 0a 00") + self.FW))
         elif f[:4] == bytes([0x01, a, 0x81, 0x00]):
+            log("join confirmed (81)")
             self.send(build_frame([0x01, 0x00, 0x85], bytes.fromhex("0a 00") + self.FW))
         elif f == self.poll_req:
             if self.state != "polled":
-                log(f"joined the bus (address {a})")
+                log(f"joined the bus (address {a}) after {self.joins} broadcasts")
+                self.joins = 0
                 self.state = "polled"
                 self.on_online(True)
             self.last_poll = time.time()
@@ -125,6 +170,14 @@ class Bus:
         buf = b""
         while True:
             buf += self.s.read(64)
+            now = time.time()
+            stalled = now - self.last_frame < 3 and now - self.last_poll_any > 90
+            if stalled != self.stalled and now > self.quiet_until:
+                self.stalled = stalled
+                if stalled:
+                    log("controller has not polled any device for 90 s, it is probably hanging")
+                if self.on_stall:
+                    self.on_stall(stalled)
             if self.state == "polled" and time.time() - self.last_poll > 5:
                 log("no poll for 5 s, joining again")
                 self.state = "join"
@@ -141,6 +194,7 @@ class Bus:
                 now = time.time()
                 if now - self.last_frame > 2:       # bus was silent -> controller (re)started
                     self.quiet_until = now + self.startup_wait
+                    self.last_poll_any = now
                     if self.state != "join":
                         self.state = "join"
                         self.on_online(False)
@@ -158,7 +212,8 @@ def main():
     cfg = configparser.ConfigParser()
     cfg.read(ap.parse_args().config, encoding="utf-8")
     bus_cfg, mq = cfg["bus"], cfg["mqtt"]
-    # The old German key names (adresse, anlaufzeit, [anlage] raeume) are still accepted.
+    # The old German key names (adresse, anlaufzeit, uhr_stellen, uhr_toleranz,
+    # [anlage] raeume) are still accepted.
     if cfg.has_option("system", "rooms"):
         rooms_raw = cfg.get("system", "rooms")
     else:
@@ -166,10 +221,14 @@ def main():
     rooms = [r.strip() for r in rooms_raw.split(",")]
     address = bus_cfg.getint("address", bus_cfg.getint("adresse", 5))
     startup_wait = bus_cfg.getint("startup_wait", bus_cfg.getint("anlaufzeit", 60))
+    clock_fix = bus_cfg.getboolean("clock_fix", bus_cfg.getboolean("uhr_stellen", True))
+    clock_tolerance = bus_cfg.getint("clock_tolerance", bus_cfg.getint("uhr_toleranz", 60))
     base = mq.get("topic", "sec_touch")
     disc = mq.get("discovery_prefix", "homeassistant")
     avail = f"{base}/status"
 
+    import warnings
+    warnings.filterwarnings("ignore", category=DeprecationWarning)   # paho-mqtt 2.x, callback API v1
     try:
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id="sec-touch-bridge")
     except AttributeError:                      # paho-mqtt 1.x
@@ -184,9 +243,19 @@ def main():
         client.publish(avail, "online" if flag else "offline", retain=True)
     def publish_level(pair, value):
         client.publish(f"{base}/pair{pair}/state", MODES[value], retain=True)
+    last_clock = {"v": None}
+    def publish_clock(dt):
+        v = dt.strftime("%Y-%m-%d %H:%M")
+        if v != last_clock["v"]:                # only publish when the minute changes
+            last_clock["v"] = v
+            client.publish(f"{base}/clock", v, retain=True)
+    def publish_stall(stalled):
+        client.publish(f"{base}/stalled", "ON" if stalled else "OFF", retain=True)
 
     bus = Bus(bus_cfg.get("port", "/dev/ttyUSB1"), address,
-              publish_level, publish_online, startup_wait=startup_wait)
+              publish_level, publish_online, startup_wait=startup_wait,
+              on_clock=publish_clock, clock_fix=clock_fix, clock_tolerance=clock_tolerance,
+              on_stall=publish_stall)
 
     device = {"identifiers": ["sec_touch_swz0021e21d"], "name": "Ventilation SEC-Touch",
               "manufacturer": "SEVentilation", "model": "SEC-Touch SWZ0021E21D"}
@@ -200,6 +269,15 @@ def main():
                     "icon": "mdi:fan", "device": device}
             c.publish(f"{disc}/select/sec_touch/paar{i}/config", json.dumps(conf), retain=True)
             c.subscribe(f"{base}/pair{i}/set")
+        # unique_ids keep the original German names so existing HA entities stay linked
+        conf = {"name": "Controller clock", "unique_id": "sec_touch_uhrzeit",
+                "state_topic": f"{base}/clock", "availability_topic": avail,
+                "icon": "mdi:clock-outline", "entity_category": "diagnostic", "device": device}
+        c.publish(f"{disc}/sensor/sec_touch/uhrzeit/config", json.dumps(conf), retain=True)
+        conf = {"name": "Controller hanging", "unique_id": "sec_touch_haengt",
+                "state_topic": f"{base}/stalled", "device_class": "problem",
+                "entity_category": "diagnostic", "device": device}
+        c.publish(f"{disc}/binary_sensor/sec_touch/haengt/config", json.dumps(conf), retain=True)
         publish_online(online["bus"])
     def on_message(c, userdata, msg):
         pair = int(msg.topic.split("/")[-2][4:])

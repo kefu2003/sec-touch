@@ -1,6 +1,6 @@
 # SEC-Touch ventilation → Home Assistant
 
-Project context for Claude Code. Language: English. As of 2026-11-10.
+Project context for Claude Code. Language: English. As of 2026-11-14.
 
 ## System
 - SEVentilation central controller SEC-Touch, firmware **SWZ0021E21D**, 6 fan pairs (12 V DC).
@@ -15,7 +15,7 @@ Project context for Claude Code. Language: English. As of 2026-11-10.
   - `/dev/rs485-ohr` → if01 (ttyUSB2), port 2 in parallel as a passive listener
 - HA runs in Docker (compose). Mosquitto is installed on the host via apt, with user `lueftung`.
 - Bridge: `/opt/sec-touch/sec_touch_mqtt.py`, config `/etc/sec-touch-mqtt.conf`, systemd service `sec-touch-mqtt`.
-- The config on the server may still use the old German keys (`adresse`, `anlaufzeit`, `[anlage] raeume`); the bridge accepts both.
+- The config on the server may still use the old German keys (`adresse`, `anlaufzeit`, `uhr_stellen`, `uhr_toleranz`, `[anlage] raeume`); the bridge accepts both.
 
 ## BUS A protocol (reverse-engineered)
 - **9600 baud, 9 data bits** (9th bit = address bit): the first 2 bytes of every frame have bit 9 = 1, all others 0. Done on the FTDI as parity Mark for bytes 0–1, then Space. Switch with `TCSETS2` (`set_parity`), **not** via pyserial. Wait about 2 character times before switching, because `flush()` returns too early on the FTDI.
@@ -34,17 +34,21 @@ Project context for Claude Code. Language: English. As of 2026-11-10.
 - Acknowledge: after **every** data 85 on the bus, including the controller's broadcasts, it asks every BDE with `01 <addr> 86 00`. Answer: `01 01 87 83 00 <CRC bytes of exactly that 85>`. With a wrong CRC the controller repeats the 86 forever.
 - `01 <addr> 88 00` = error/NAK.
 - On boot the controller scans addresses 02..0C. If the bridge is active while the controller starts, nobody joins. So after more than 2 s of bus silence the bridge stays quiet for `startup_wait` (60 s).
-- Other frames: `21 ff d2 80` every 0.78 s, `00 00 00 0e …` = time every 5 s, properties 0xA7/0xA8 every minute. Property 9 = BDE name.
+- Time frame every 5 s: `00 00 00 0e <crc> 01 00 00 DD MM YY 02 00 SS MM HH 04 00 00` (binary, year +2000, last triple unknown).
+  - Setting the clock (like the touch panel does): two data 85 in poll answers, `01 00 00 DD MM YY` and `02 00 SS MM HH`.
+  - The bridge sets it to server local time if it is off by more than `clock_tolerance` (60 s), at most every 10 min (`clock_fix`).
+- Controller hang: time frame keeps coming but no `01 xx 84 00` for 90 s. The bridge reports this as `sec_touch/stalled` (binary sensor "Controller hanging"). How to recover automatically is open.
+- Other frames: `21 ff d2 80` every 0.78 s, properties 0xA7/0xA8 every minute. Property 9 = BDE name.
 
 ## Files in this folder
-- `sec_touch_mqtt.py`: bridge (bus emulation as BDE 05, MQTT discovery, 6 `select` entities).
+- `sec_touch_mqtt.py`: bridge (bus emulation as BDE 05, MQTT discovery, 6 `select` entities, diagnostic sensor for the controller clock and binary sensor for a hanging controller).
+  - MQTT topics use English names (`pair<n>`, `clock`, `stalled`); discovery object IDs and `unique_id`s keep the German names (`paar<n>`, `uhrzeit`, `haengt`) so existing HA entities stay linked.
 - `sec-touch-mqtt.conf` / `.service`: templates for config and service (the password only exists on the server).
 - `bus_sniff.py`: tool for analysis and testing.
   - Options: `--decode --new`, `--parity-test`, `--bits`, `--emulate ADDR`.
   - Working invocation: `--emulate 5 --baud 9600 --parity S --nine-bit 2`.
   - Note: the default baud is still 9400.
 - `SETUP-MQTT.md`: setup of Mosquitto and the bridge.
-- `lueftung*.yaml`: old ESPHome attempts (PC port), no longer in use.
 
 ## Open ideas
 - Use the `sec_touch` component linked above as a reference for property numbers and mode values when decoding further properties.
